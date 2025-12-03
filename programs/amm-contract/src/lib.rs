@@ -7,9 +7,6 @@ declare_id!("ApjKE4vSFoMgd9Xd3J2vDGphVTCJgtD7sELUvSvwS7yY");
 pub mod amm_contract {
 
 
-    use std::f32::consts::E;
-
-    use anchor_spl::token::{self, spl_token::instruction::transfer};
 
     use super::*;
 
@@ -17,18 +14,12 @@ pub mod amm_contract {
         msg!("Greetings from: {:?}", ctx.program_id);
 
         let amm = &mut ctx.accounts.amm_account;
-        let _token_a = ctx.accounts.mint_a.key();
-        let _token_b = ctx.accounts.mint_b.key();
+        amm.token_a = ctx.accounts.mint_a.key();
+        amm.token_b = ctx.accounts.mint_b.key();
         amm.reserve_a=0;
         amm.reserve_b=0;
         amm.bump = ctx.bumps.amm_account;
-        // you will later set:
-        // let amm = &mut ctx.accounts.amm_account;
-        // amm.token_a = ctx.accounts.mint_a.key();
-        // amm.token_b = ctx.accounts.mint_b.key();
-        // amm.reserve_a = 0;
-        // amm.reserve_b = 0;
-        // amm.bump = *ctx.bumps.get("amm_account").unwrap();
+        
 
         Ok(())
     }
@@ -37,12 +28,8 @@ pub mod amm_contract {
         let amm = &mut ctx.accounts.amm_account;
         require!(amount1> 0&& amount2>0,AmmError::InvalidAmount);
 
-        let user_token_a = &ctx.accounts.user_token_a;
-        let user_token_b = &ctx.accounts.user_token_b;
-        let vault_a = &ctx.accounts.vault_a;
-        let vault_b= &ctx.accounts.vault_b;
+       
         let lp_mint = &ctx.accounts.lp_mint;
-        let user_lp_token = &ctx.accounts.user_lp_token;
         let token_program = &ctx.accounts.token_program;
 
         let token_a_key = amm.token_a;
@@ -50,7 +37,7 @@ pub mod amm_contract {
         let bump = amm.bump;
 
         let seeds: [&[u8]; 4] = [
-            b"client",
+            b"pool",
             token_a_key.as_ref(),
             token_b_key.as_ref(),
             &[bump],
@@ -60,11 +47,13 @@ pub mod amm_contract {
         let liquidity_minted: u64;
         // adding liquidity for the first time 
         if amm.reserve_a==0 && amm.reserve_b==0 {
+
+            
+           
+            let product = (amount1 as u128).checked_mul(amount2 as u128).ok_or(AmmError::Overflow)?;
+            liquidity_minted = product.integer_sqrt() as u64;
             amm.reserve_a= amm.reserve_a.checked_add(amount1).ok_or(AmmError::Overflow)?;
             amm.reserve_b= amm.reserve_b.checked_add(amount2).ok_or(AmmError::Overflow)?;
-
-            liquidity_minted = amount1;
-
         }
 
         else {
@@ -78,7 +67,8 @@ pub mod amm_contract {
         require!(amount2 == optimal_b, AmmError::InvalidRatio);
 
         // LP tokens minted proportionally
-        liquidity_minted = (amm.reserve_a as u128)
+        let lp_supply = lp_mint.supply;
+        liquidity_minted = (lp_supply as u128)
             .checked_mul(amount1 as u128)
             .ok_or(AmmError::Overflow)?
             .checked_div(amm.reserve_a as u128)
@@ -88,33 +78,39 @@ pub mod amm_contract {
         amm.reserve_a = amm.reserve_a.checked_add(amount1).ok_or(AmmError::Overflow)?;
         amm.reserve_b = amm.reserve_b.checked_add(amount2).ok_or(AmmError::Overflow)?;
         }
-        // tokenA transfer from User to Liqudity Pool (PDA)
-        anchor_spl::token::transfer(CpiContext::new(token_program.to_account_info(),
-        anchor_spl::token::Transfer{
-            from:user_token_a.to_account_info(),
-            to: vault_a.to_account_info(),
+       
+        // token transfer from user to LP(PDA)  
+
+        let transfer_a_contex = anchor_spl::token::Transfer{
+            from : ctx.accounts.user_token_a.to_account_info(),
+            to: ctx.accounts.vault_a.to_account_info(),
             authority: ctx.accounts.signer.to_account_info()
-        }
-    ), amount1)?;
+        };
 
-    // transfer tokenB from User to LP(PDA)
+        let cpi_a_ctx = CpiContext::new(token_program.to_account_info(), transfer_a_contex);
+        anchor_spl::token::transfer(cpi_a_ctx, amount1)?;
 
-    
-    anchor_spl::token::transfer(CpiContext::new(token_program.to_account_info(),
-    anchor_spl::token::Transfer{
-        from:user_token_b.to_account_info(),
-        to: vault_b.to_account_info(),
-        authority: ctx.accounts.signer.to_account_info()
-    }
-), amount2)?;
-    // mint LP token for user 
+        // token b transfer from user to LP(PDA)
+        let transfer_b_contex = anchor_spl::token::Transfer{
+            from : ctx.accounts.user_token_b.to_account_info(),
+            to: ctx.accounts.vault_b.to_account_info(),
+            authority: ctx.accounts.signer.to_account_info()
+        };
 
-    let mintContex = CpiContext::new_with_signer(token_program.to_account_info(), anchor_spl::token::MintTo{
-        mint : ctx.accounts.lp_mint.to_account_info(),
-        to : user_lp_token.to_account_info(),
-        authority:amm.to_account_info()
-    }, &signer_seeds);
-    anchor_spl::token::mint_to(mintContex, liquidity_minted)?;
+        let cpi_b_ctx = CpiContext::new(token_program.to_account_info(), transfer_b_contex);
+        anchor_spl::token::transfer(cpi_b_ctx, amount2)?;
+
+
+        // and based on this Lp will give a LP toke to the user 
+
+        let mint_contex = anchor_spl::token::MintTo{
+            mint : ctx.accounts.lp_mint.to_account_info(),
+            to : ctx.accounts.user_lp_token.to_account_info(),
+            authority : amm.to_account_info()
+        };
+
+        let mint_cpi = CpiContext::new_with_signer(token_program.to_account_info(), mint_contex, &signer_seeds);
+        anchor_spl::token::mint_to(mint_cpi, liquidity_minted)?;
         Ok(())
 
     }
@@ -143,7 +139,7 @@ pub mod amm_contract {
          let (reserve_in,reserve_out,vault_in,vault_out) = if token_inp == minta {
             (amm.reserve_a,amm.reserve_b,vault_a,vault_b)
          }else{
-            (amm.reserve_a,amm.reserve_b,vault_b,vault_a)
+            (amm.reserve_b,amm.reserve_a,vault_b,vault_a)
          };
          
         //  transfer token from user to PDA 
@@ -184,7 +180,72 @@ pub mod amm_contract {
         }
         Ok(())
     }
-    pub fn removeliquidity(ctx:Context<RemoveLiquidityPool>)->Result<()>{
+    pub fn removeliquidity(ctx:Context<RemoveLiquidityPool>,lp_amount : u64)->Result<()>{
+        require!(lp_amount>0,AmmError::InvalidAmount);
+
+        let amm = &mut ctx.accounts.amm_account;
+        let lp_mint  =  &ctx.accounts.lp_mint;
+        let lp_supply  = lp_mint.supply;
+
+        let amount_a = (amm.reserve_a as u128)
+            .checked_mul(lp_amount as u128)
+            .ok_or(AmmError::Overflow)?
+            .checked_div(lp_supply as u128)
+            .ok_or(AmmError::Overflow)? as u64;
+
+        let amount_b = (amm.reserve_b as u128)
+            .checked_mul(lp_amount as u128)
+            .ok_or(AmmError::Overflow)?
+            .checked_div(lp_supply as u128)
+            .ok_or(AmmError::Overflow)? as u64;
+        
+        let token_a_key = amm.token_a;
+        let token_b_key = amm.token_b;
+        let bump = amm.bump;
+        let seeds : [&[u8];4] =  [
+            b"pool",
+            token_a_key.as_ref(),
+            token_b_key.as_ref(),
+            &[bump]
+        ];
+        
+        let signer_seeds : [&[&[u8]]; 1] = [&seeds];
+
+        // Burn LP token 
+
+        let burn_ctx = anchor_spl::token::Burn{
+            mint :  lp_mint.to_account_info(),
+            from : ctx.accounts.user_lp_token.to_account_info(),
+            authority:ctx.accounts.signer.to_account_info()
+        };
+
+        let burn_cpi = CpiContext::new(ctx.accounts.token_program.to_account_info(), burn_ctx);
+        anchor_spl::token::burn(burn_cpi, lp_amount)?;
+        
+        // transfer token A  From Liqyidity pool to user
+
+        let transfer_a_ctx  = anchor_spl::token::Transfer{
+            from : ctx.accounts.vault_a.to_account_info(),
+            to : ctx.accounts.user_token_a.to_account_info(),
+            authority : amm.to_account_info()
+        };
+
+        let a_cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), transfer_a_ctx, &signer_seeds);
+        anchor_spl::token::transfer(a_cpi_ctx, amount_a)?;
+
+        // transfer token B from Liquidity pool to user 
+
+        let transfer_b_ctx  = anchor_spl::token::Transfer{
+            from : ctx.accounts.vault_b.to_account_info(),
+            to : ctx.accounts.user_token_b.to_account_info(),
+            authority : amm.to_account_info()
+        };
+
+        let b_cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), transfer_b_ctx, &signer_seeds);
+        anchor_spl::token::transfer(b_cpi_ctx, amount_b)?;
+
+        amm.reserve_a = amm.reserve_a.checked_sub(amount_a).ok_or(AmmError::Overflow)?;
+        amm.reserve_b = amm.reserve_b.checked_sub(amount_b).ok_or(AmmError::Overflow)?;
         Ok(())
     }
 }
