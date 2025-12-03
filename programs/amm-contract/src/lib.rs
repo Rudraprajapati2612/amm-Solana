@@ -7,7 +7,9 @@ declare_id!("ApjKE4vSFoMgd9Xd3J2vDGphVTCJgtD7sELUvSvwS7yY");
 pub mod amm_contract {
 
 
-    use anchor_spl::token::spl_token::instruction::transfer;
+    use std::f32::consts::E;
+
+    use anchor_spl::token::{self, spl_token::instruction::transfer};
 
     use super::*;
 
@@ -97,7 +99,7 @@ pub mod amm_contract {
 
     // transfer tokenB from User to LP(PDA)
 
-    // let transfixn2 =  ;
+    
     anchor_spl::token::transfer(CpiContext::new(token_program.to_account_info(),
     anchor_spl::token::Transfer{
         from:user_token_b.to_account_info(),
@@ -115,6 +117,75 @@ pub mod amm_contract {
     anchor_spl::token::mint_to(mintContex, liquidity_minted)?;
         Ok(())
 
+    }
+    pub fn swap (ctx:Context<Swap>,token_inp:Pubkey,amount_token_inp:u64)->Result<()>{
+        require!(amount_token_inp > 0, AmmError::InvalidAmount);
+         
+        let amm = &mut ctx.accounts.amm_account;
+         let vault_a = &ctx.accounts.vault_a;
+         let vault_b = &ctx.accounts.vault_b;
+         let minta = ctx.accounts.mint_a.key();
+         let mintb = ctx.accounts.mint_b.key();
+         let user_source = &ctx.accounts.user_source;
+         let user_destination = &ctx.accounts.user_destination;
+         let tokenprogram = &ctx.accounts.token_program;
+
+
+         require!(user_source.mint == minta || user_source.mint == mintb , AmmError::InvalidToken);
+         let seeds = &[
+            b"pool",
+            minta.as_ref(),
+            mintb.as_ref(),
+            &[amm.bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
+         let (reserve_in,reserve_out,vault_in,vault_out) = if token_inp == minta {
+            (amm.reserve_a,amm.reserve_b,vault_a,vault_b)
+         }else{
+            (amm.reserve_a,amm.reserve_b,vault_b,vault_a)
+         };
+         
+        //  transfer token from user to PDA 
+        let token_contex_transfer = anchor_spl::token::Transfer{
+            from : ctx.accounts.user_source.to_account_info(),
+            to  : vault_in.to_account_info(),
+            authority : ctx.accounts.signer.to_account_info()
+        };
+
+        let cpi_ctx = CpiContext::new(tokenprogram.to_account_info(), token_contex_transfer);
+
+        anchor_spl::token::transfer(cpi_ctx,amount_token_inp)?;
+
+
+        let amount_out = reserve_out
+        .checked_mul(amount_token_inp)
+        .ok_or(AmmError::MathOverflow)?
+        .checked_div(reserve_in + amount_token_inp)
+        .ok_or(AmmError::MathOverflow)?;
+
+        // transfer from  Liquidity pool to user in this pda need to do a signature
+
+
+        let pda_token_transfer = anchor_spl::token::Transfer{
+            from : vault_out.to_account_info(),
+            to : user_destination.to_account_info(),
+            authority : amm.to_account_info()
+        } ;
+        let pda_cpi = CpiContext::new_with_signer(tokenprogram.to_account_info(), pda_token_transfer, signer_seeds);
+        anchor_spl::token::transfer(pda_cpi, amount_out)?;
+
+        if token_inp==minta{
+            amm.reserve_a+= amount_token_inp;
+            amm.reserve_b -= amount_out
+        }else{
+            amm.reserve_a -= amount_out;
+            amm.reserve_b+=amount_token_inp
+        }
+        Ok(())
+    }
+    pub fn removeliquidity(ctx:Context<RemoveLiquidityPool>)->Result<()>{
+        Ok(())
     }
 }
 
@@ -304,7 +375,11 @@ pub enum AmmError {
     #[msg("value is overflowed")]
     Overflow,
     #[msg("Ratio is not valid")]
-    InvalidRatio
+    InvalidRatio,
+    #[msg("Invalid token")]
+    InvalidToken,
+    #[msg("overflow errro change in lots of bits")]
+    MathOverflow
 }
 
 trait IntegerSquareRoot {
