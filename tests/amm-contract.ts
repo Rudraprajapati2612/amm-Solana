@@ -1,9 +1,10 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AmmContract } from "../target/types/amm_contract";
-import {TOKEN_PROGRAM_ID, createAccount, createMint, mintTo } from "@solana/spl-token";
+import {TOKEN_PROGRAM_ID, TokenAccountNotFoundError, createAccount, createMint, getAccount, mintTo } from "@solana/spl-token";
 import {Keypair,PublicKey,LAMPORTS_PER_SOL} from "@solana/web3.js"; 
 import { assert } from "chai";
+import { min } from "bn.js";
 describe("amm-contract", () => {
   // Configure the client to use the local cluster.
   // anchor.setProvider(anchor.AnchorProvider.env());
@@ -139,7 +140,212 @@ describe("amm-contract", () => {
       
       console.log("Your transaction signature", tx);
     });
+
+    it("Add liquidity for the first time", async()=>{
+      const amountA = new anchor.BN(100 * LAMPORTS_PER_SOL);
+      const amountB = new anchor.BN(100 * LAMPORTS_PER_SOL);
+
+      userLpTokenAccount = await createAccount(
+        provider.connection,
+        payer.payer,
+        lpMint,
+        user.publicKey
+      );
+
+      const tx = await program.methods.addliquidity(amountA,amountB).
+      accounts({
+        signer : user.publicKey,
+        mintA : mintA,
+        mintB:mintB,
+        userTokenA:userTokenAccountA,
+        userTokenB:userTokenAccountB,
+        userLpToken : userLpTokenAccount,
+        tokenProgram:TOKEN_PROGRAM_ID
+      }).
+      signers([user]).
+      rpc();
+
+      console.log("Add liquidity transaction signature:", tx);
+      // now check that actuclly token is transfered from  user to Account 
+      const ammAccounData = await program.account.ammAccount.fetch(ammAccount);
+      assert(ammAccounData.reserveA.toString(),amountA.toString());
+      assert(ammAccounData.reserveB.toString(),amountB.toString());
+
+      //  check the account info and cheack that amount of lp is greatet than 0
+      const lpTokenAccount = await getAccount(
+        provider.connection,
+        userLpTokenAccount
+      );
+      assert.ok(Number(lpTokenAccount.amount) > 0);
+      console.log("Liquidity added successfully!");
+      console.log("LP Tokens minted:", lpTokenAccount.amount.toString());
+    });
+
+    it("swap Token A for  Token B ",async()=>{
+      const swapAmount = new anchor.BN(10 * LAMPORTS_PER_SOL);
+    const minAmountOut = new anchor.BN(1);
+    const userAccountABefore = await getAccount(
+      provider.connection,
+      userTokenAccountA
+    );
+
+    const userAccountBBefore = await getAccount(
+      provider.connection,
+      userTokenAccountB
+    );
+
+
+    const tx = await program.methods.swap(mintA,swapAmount,minAmountOut)
+    .accounts({
+      signer : user.publicKey,
+      mintA : mintA,
+      mintB:mintB,
+      userSource:userTokenAccountA,
+      userDestination:userTokenAccountB,
+      tokenProgram : TOKEN_PROGRAM_ID
+    }).signers([user]).rpc()
+
+    console.log("Swap transaction signature:", tx);
+
+    // Get balances after swap
+    const userAccountAAfter = await getAccount(
+      provider.connection,
+      userTokenAccountA
+    );
+    const userAccountBAfter = await getAccount(
+      provider.connection,
+      userTokenAccountB
+    );
+
+    // Verify token A decreased
+    assert.ok(userAccountAAfter.amount < userAccountABefore.amount);
+    // Verify token B increased
+    assert.ok(userAccountBAfter.amount > userAccountBBefore.amount);
+
+    console.log("Swap successful!");
+    console.log(
+      "Token A spent:",
+      (userAccountABefore.amount - userAccountAAfter.amount).toString()
+    );
+    console.log(
+      "Token B received:",
+      (userAccountBAfter.amount - userAccountBBefore.amount).toString()
+    );
+
+    })
+//  check balance before swap then call swap function and after it check balance after swap 
+// if balance of b is decrease and a increase then test passed 
+    it("swap token B for  token A",async()=>{
+      const swapAmount = new anchor.BN(5 * LAMPORTS_PER_SOL);
+    const minAmountOut = new anchor.BN(1);
+
+    // Get balances before swap
+    const userAccountABefore = await getAccount(
+      provider.connection,
+      userTokenAccountA
+    );
+    const userAccountBBefore = await getAccount(
+      provider.connection,
+      userTokenAccountB
+    );
+
+    const tx = await program.methods
+      .swap(mintB, swapAmount, minAmountOut)
+      .accounts({
+        signer: user.publicKey,
+    
+        mintA: mintA,
+        mintB: mintB,
+        userSource: userTokenAccountB,
+        userDestination: userTokenAccountA,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([user])
+      .rpc();
+
+    console.log("Swap transaction signature:", tx);
+
+    // Get balances after swap
+    const userAccountAAfter = await getAccount(
+      provider.connection,
+      userTokenAccountA
+    );
+    const userAccountBAfter = await getAccount(
+      provider.connection,
+      userTokenAccountB
+    );
+
+    // Verify token B decreased
+    assert.ok(userAccountBAfter.amount < userAccountBBefore.amount);
+    // Verify token A increased
+    assert.ok(userAccountAAfter.amount > userAccountABefore.amount);
+
+    console.log("Reverse swap successful!");
+    })
+    
+    it("Removes liquidity from the pool", async () => {
+      // Get LP token balance
+      const lpTokenAccount = await getAccount(
+        provider.connection,
+        userLpTokenAccount
+      );
+      const lpAmount = new anchor.BN(lpTokenAccount.amount.toString()).div(
+        new anchor.BN(2)
+      ); // Remove 50% of liquidity
+  
+      // Get balances before
+      const userAccountABefore = await getAccount(
+        provider.connection,
+        userTokenAccountA
+      );
+      const userAccountBBefore = await getAccount(
+        provider.connection,
+        userTokenAccountB
+      );
+  
+      const tx = await program.methods
+        .removeliquidity(lpAmount)
+        .accounts({
+          signer: user.publicKey,
+          
+          mintA: mintA,
+          mintB: mintB,
+          
+          userTokenA: userTokenAccountA,
+          userTokenB: userTokenAccountB,
+          userLpToken: userLpTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([user])
+        .rpc();
+  
+      console.log("Remove liquidity transaction signature:", tx);
+  
+      // Get balances after
+      const userAccountAAfter = await getAccount(
+        provider.connection,
+        userTokenAccountA
+      );
+      const userAccountBAfter = await getAccount(
+        provider.connection,
+        userTokenAccountB
+      );
+  
+      // Verify tokens were returned
+      assert.ok(userAccountAAfter.amount > userAccountABefore.amount);
+      assert.ok(userAccountBAfter.amount > userAccountBBefore.amount);
+  
+      console.log("Liquidity removed successfully!");
+      console.log(
+        "Token A received:",
+        (userAccountAAfter.amount - userAccountABefore.amount).toString()
+      );
+      console.log(
+        "Token B received:",
+        (userAccountBAfter.amount - userAccountBBefore.amount).toString()
+      );
+    });
+
   })
 
-  
 });
