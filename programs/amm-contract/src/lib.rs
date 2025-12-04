@@ -1,11 +1,12 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Mint, MintTo, Burn, Transfer};
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 declare_id!("ApjKE4vSFoMgd9Xd3J2vDGphVTCJgtD7sELUvSvwS7yY");
 
 #[program]
 pub mod amm_contract {
     use super::*;
+    use anchor_spl::token_interface::{burn, mint_to, transfer_checked, Burn, MintTo, TransferChecked};
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         msg!("Initializing AMM Pool");
@@ -79,22 +80,24 @@ pub mod amm_contract {
         }
 
         // Transfer token A from user to vault
-        let transfer_a_context = Transfer {
+        let transfer_a_context = TransferChecked {
             from: ctx.accounts.user_token_a.to_account_info(),
             to: ctx.accounts.vault_a.to_account_info(),
             authority: ctx.accounts.signer.to_account_info(),
+            mint: ctx.accounts.mint_a.to_account_info(),
         };
         let cpi_a_ctx = CpiContext::new(token_program.to_account_info(), transfer_a_context);
-        anchor_spl::token::transfer(cpi_a_ctx, amount1)?;
+        transfer_checked(cpi_a_ctx, amount1, ctx.accounts.mint_a.decimals)?;
 
         // Transfer token B from user to vault
-        let transfer_b_context = Transfer {
+        let transfer_b_context = TransferChecked {
             from: ctx.accounts.user_token_b.to_account_info(),
             to: ctx.accounts.vault_b.to_account_info(),
             authority: ctx.accounts.signer.to_account_info(),
+            mint: ctx.accounts.mint_b.to_account_info(),
         };
         let cpi_b_ctx = CpiContext::new(token_program.to_account_info(), transfer_b_context);
-        anchor_spl::token::transfer(cpi_b_ctx, amount2)?;
+        transfer_checked(cpi_b_ctx, amount2, ctx.accounts.mint_b.decimals)?;
 
         // Mint LP tokens to user
         let mint_context = MintTo {
@@ -107,7 +110,7 @@ pub mod amm_contract {
             mint_context,
             &signer_seeds,
         );
-        anchor_spl::token::mint_to(mint_cpi, liquidity_minted)?;
+        mint_to(mint_cpi, liquidity_minted)?;
 
         Ok(())
     }
@@ -143,20 +146,40 @@ pub mod amm_contract {
         let signer_seeds = &[&seeds[..]];
 
         // Determine swap direction
-        let (reserve_in, reserve_out, vault_in, vault_out) = if token_inp == minta {
-            (amm.reserve_a, amm.reserve_b, vault_a, vault_b)
-        } else {
-            (amm.reserve_b, amm.reserve_a, vault_b, vault_a)
-        };
+        let (reserve_in, reserve_out, vault_in, vault_out, mint_in, mint_out, decimals_in, decimals_out) = 
+            if token_inp == minta {
+                (
+                    amm.reserve_a, 
+                    amm.reserve_b, 
+                    vault_a, 
+                    vault_b,
+                    &ctx.accounts.mint_a,
+                    &ctx.accounts.mint_b,
+                    ctx.accounts.mint_a.decimals,
+                    ctx.accounts.mint_b.decimals,
+                )
+            } else {
+                (
+                    amm.reserve_b, 
+                    amm.reserve_a, 
+                    vault_b, 
+                    vault_a,
+                    &ctx.accounts.mint_b,
+                    &ctx.accounts.mint_a,
+                    ctx.accounts.mint_b.decimals,
+                    ctx.accounts.mint_a.decimals,
+                )
+            };
 
         // Transfer input tokens from user to vault
-        let token_context_transfer = Transfer {
+        let token_context_transfer = TransferChecked {
             from: ctx.accounts.user_source.to_account_info(),
             to: vault_in.to_account_info(),
             authority: ctx.accounts.signer.to_account_info(),
+            mint: mint_in.to_account_info(),
         };
         let cpi_ctx = CpiContext::new(tokenprogram.to_account_info(), token_context_transfer);
-        anchor_spl::token::transfer(cpi_ctx, amount_token_inp)?;
+        transfer_checked(cpi_ctx, amount_token_inp, decimals_in)?;
 
         // Calculate output amount using constant product formula
         let amount_out = reserve_out
@@ -173,17 +196,18 @@ pub mod amm_contract {
         require!(amount_out >= min_amount_out, AmmError::SlippageExceeded);
 
         // Transfer output tokens from vault to user (PDA signs)
-        let pda_token_transfer = Transfer {
+        let pda_token_transfer = TransferChecked {
             from: vault_out.to_account_info(),
             to: ctx.accounts.user_destination.to_account_info(),
             authority: amm.to_account_info(),
+            mint: mint_out.to_account_info(),
         };
         let pda_cpi = CpiContext::new_with_signer(
             tokenprogram.to_account_info(),
             pda_token_transfer,
             signer_seeds,
         );
-        anchor_spl::token::transfer(pda_cpi, amount_out)?;
+        transfer_checked(pda_cpi, amount_out, decimals_out)?;
 
         // Update reserves
         if token_inp == minta {
@@ -241,33 +265,35 @@ pub mod amm_contract {
             authority: ctx.accounts.signer.to_account_info(),
         };
         let burn_cpi = CpiContext::new(ctx.accounts.token_program.to_account_info(), burn_ctx);
-        anchor_spl::token::burn(burn_cpi, lp_amount)?;
+        burn(burn_cpi, lp_amount)?;
 
         // Transfer token A from vault to user
-        let transfer_a_ctx = Transfer {
+        let transfer_a_ctx = TransferChecked {
             from: ctx.accounts.vault_a.to_account_info(),
             to: ctx.accounts.user_token_a.to_account_info(),
             authority: amm.to_account_info(),
+            mint: ctx.accounts.mint_a.to_account_info(),
         };
         let a_cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             transfer_a_ctx,
             &signer_seeds,
         );
-        anchor_spl::token::transfer(a_cpi_ctx, amount_a)?;
+        transfer_checked(a_cpi_ctx, amount_a, ctx.accounts.mint_a.decimals)?;
 
         // Transfer token B from vault to user
-        let transfer_b_ctx = Transfer {
+        let transfer_b_ctx = TransferChecked {
             from: ctx.accounts.vault_b.to_account_info(),
             to: ctx.accounts.user_token_b.to_account_info(),
             authority: amm.to_account_info(),
+            mint: ctx.accounts.mint_b.to_account_info(),
         };
         let b_cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             transfer_b_ctx,
             &signer_seeds,
         );
-        anchor_spl::token::transfer(b_cpi_ctx, amount_b)?;
+        transfer_checked(b_cpi_ctx, amount_b, ctx.accounts.mint_b.decimals)?;
 
         // Update reserves
         amm.reserve_a = amm.reserve_a.checked_sub(amount_a).ok_or(AmmError::Overflow)?;
@@ -293,8 +319,8 @@ pub struct Initialize<'info> {
     )]
     pub amm_account: Account<'info, AmmAccount>,
 
-    pub mint_a: Account<'info, Mint>,
-    pub mint_b: Account<'info, Mint>,
+    pub mint_a: InterfaceAccount<'info, Mint>,
+    pub mint_b: InterfaceAccount<'info, Mint>,
 
     /// LP token mint - created as PDA during initialization
     #[account(
@@ -304,8 +330,9 @@ pub struct Initialize<'info> {
         bump,
         mint::decimals = 9,
         mint::authority = amm_account,
+        mint::token_program = token_program,
     )]
-    pub lp_mint: Account<'info, Mint>,
+    pub lp_mint: InterfaceAccount<'info, Mint>,
 
     /// Vault for token A
     #[account(
@@ -314,9 +341,10 @@ pub struct Initialize<'info> {
         seeds = [b"vault_a", amm_account.key().as_ref()],
         bump,
         token::mint = mint_a,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_a: Account<'info, TokenAccount>,
+    pub vault_a: InterfaceAccount<'info, TokenAccount>,
 
     /// Vault for token B
     #[account(
@@ -325,13 +353,13 @@ pub struct Initialize<'info> {
         seeds = [b"vault_b", amm_account.key().as_ref()],
         bump,
         token::mint = mint_b,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_b: Account<'info, TokenAccount>,
+    pub vault_b: InterfaceAccount<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
@@ -346,43 +374,45 @@ pub struct AddLiquidityPool<'info> {
     )]
     pub amm_account: Account<'info, AmmAccount>,
 
-    pub mint_a: Account<'info, Mint>,
-    pub mint_b: Account<'info, Mint>,
+    pub mint_a: InterfaceAccount<'info, Mint>,
+    pub mint_b: InterfaceAccount<'info, Mint>,
 
     #[account(mut)]
-    pub user_token_a: Account<'info, TokenAccount>,
+    pub user_token_a: InterfaceAccount<'info, TokenAccount>,
     #[account(mut)]
-    pub user_token_b: Account<'info, TokenAccount>,
+    pub user_token_b: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"vault_a", amm_account.key().as_ref()],
         bump,
         token::mint = mint_a,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_a: Account<'info, TokenAccount>,
+    pub vault_a: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"vault_b", amm_account.key().as_ref()],
         bump,
         token::mint = mint_b,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_b: Account<'info, TokenAccount>,
+    pub vault_b: InterfaceAccount<'info, TokenAccount>,
 
     #[account(mut)]
-    pub user_lp_token: Account<'info, TokenAccount>,
+    pub user_lp_token: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"lp_mint", mint_a.key().as_ref(), mint_b.key().as_ref()],
         bump,
     )]
-    pub lp_mint: Account<'info, Mint>,
+    pub lp_mint: InterfaceAccount<'info, Mint>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -397,43 +427,45 @@ pub struct RemoveLiquidityPool<'info> {
     )]
     pub amm_account: Account<'info, AmmAccount>,
 
-    pub mint_a: Account<'info, Mint>,
-    pub mint_b: Account<'info, Mint>,
+    pub mint_a: InterfaceAccount<'info, Mint>,
+    pub mint_b: InterfaceAccount<'info, Mint>,
 
     #[account(
         mut,
         seeds = [b"vault_a", amm_account.key().as_ref()],
         bump,
         token::mint = mint_a,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_a: Account<'info, TokenAccount>,
+    pub vault_a: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"vault_b", amm_account.key().as_ref()],
         bump,
         token::mint = mint_b,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_b: Account<'info, TokenAccount>,
+    pub vault_b: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"lp_mint", mint_a.key().as_ref(), mint_b.key().as_ref()],
         bump,
     )]
-    pub lp_mint: Account<'info, Mint>,
+    pub lp_mint: InterfaceAccount<'info, Mint>,
 
     #[account(mut)]
-    pub user_token_a: Account<'info, TokenAccount>,
+    pub user_token_a: InterfaceAccount<'info, TokenAccount>,
     #[account(mut)]
-    pub user_token_b: Account<'info, TokenAccount>,
+    pub user_token_b: InterfaceAccount<'info, TokenAccount>,
 
     #[account(mut)]
-    pub user_lp_token: Account<'info, TokenAccount>,
+    pub user_lp_token: InterfaceAccount<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -448,34 +480,36 @@ pub struct Swap<'info> {
     )]
     pub amm_account: Account<'info, AmmAccount>,
 
-    pub mint_a: Account<'info, Mint>,
-    pub mint_b: Account<'info, Mint>,
+    pub mint_a: InterfaceAccount<'info, Mint>,
+    pub mint_b: InterfaceAccount<'info, Mint>,
 
     #[account(
         mut,
         seeds = [b"vault_a", amm_account.key().as_ref()],
         bump,
         token::mint = mint_a,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_a: Account<'info, TokenAccount>,
+    pub vault_a: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         seeds = [b"vault_b", amm_account.key().as_ref()],
         bump,
         token::mint = mint_b,
-        token::authority = amm_account
+        token::authority = amm_account,
+        token::token_program = token_program,
     )]
-    pub vault_b: Account<'info, TokenAccount>,
+    pub vault_b: InterfaceAccount<'info, TokenAccount>,
 
     #[account(mut)]
-    pub user_source: Account<'info, TokenAccount>,
+    pub user_source: InterfaceAccount<'info, TokenAccount>,
 
     #[account(mut)]
-    pub user_destination: Account<'info, TokenAccount>,
+    pub user_destination: InterfaceAccount<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[account]
