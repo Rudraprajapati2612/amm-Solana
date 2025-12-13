@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
-declare_id!("ApjKE4vSFoMgd9Xd3J2vDGphVTCJgtD7sELUvSvwS7yY");
+declare_id!("J58DT4crTYYgeogsovNCHcdBGhAMZVyX4V9X2jzfTka3");
 
 #[program]
 pub mod amm_contract {
@@ -17,6 +17,13 @@ pub mod amm_contract {
         amm.reserve_a = 0;
         amm.reserve_b = 0;
         amm.bump = ctx.bumps.amm_account;
+
+
+        emit!(InitializedEvent{
+            pool : amm.key(),
+            token_a : amm.token_a,
+            token_b : amm.token_b
+        });
 
         Ok(())
     }
@@ -112,6 +119,13 @@ pub mod amm_contract {
         );
         mint_to(mint_cpi, liquidity_minted)?;
 
+        emit!(AddLiquidityEvent{
+            pool : amm.key(),
+            amount_a : amount1,
+            amount_b:amount2,
+            lp_minted : liquidity_minted
+        });
+        
         Ok(())
     }
 
@@ -217,6 +231,15 @@ pub mod amm_contract {
             amm.reserve_b = amm.reserve_b.checked_add(amount_token_inp).ok_or(AmmError::Overflow)?;
             amm.reserve_a = amm.reserve_a.checked_sub(amount_out).ok_or(AmmError::Overflow)?;
         }
+
+        emit!(SwapLiquidityEvent {
+            pool: amm.key(),
+            token_in: token_inp,
+            token_out: if token_inp == minta { mintb } else { minta },
+            amount_in: amount_token_inp,
+            amount_out,
+        });
+        
 
         Ok(())
     }
@@ -538,6 +561,31 @@ pub enum AmmError {
     MathOverflow,
 }
 
+
+#[event]
+pub struct InitializedEvent{
+    pub pool : Pubkey,
+    pub token_a : Pubkey,
+    pub token_b : Pubkey
+}
+
+
+#[event]
+pub struct AddLiquidityEvent{
+    pub pool : Pubkey,
+    pub amount_a:u64,
+    pub amount_b:u64,
+    pub lp_minted:u64
+}
+
+#[event]
+pub struct SwapLiquidityEvent{
+    pub pool : Pubkey,
+    pub amount_in :  u64,
+    pub amount_out : u64,
+    pub token_in :  Pubkey,
+    pub token_out : Pubkey,
+}
 trait IntegerSquareRoot {
     fn integer_sqrt(&self) -> Self;
 }
